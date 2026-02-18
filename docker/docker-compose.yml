@@ -1,0 +1,24 @@
+services:
+  worker1:
+    build: .
+    container_name: worker1
+    network_mode: host
+    restart: unless-stopped
+
+  worker2:
+    build: .
+    container_name: worker2
+    network_mode: host
+    restart: unless-stopped
+
+  worker3:
+    build: .
+    container_name: worker3
+    network_mode: host
+    restart: unless-stopped
+
+  worker4:
+    build: .
+    container_name: worker4
+    network_mode: host
+    restart: unless-stopped
