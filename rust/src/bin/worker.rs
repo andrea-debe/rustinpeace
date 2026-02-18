@@ -5,7 +5,7 @@ use std::time::Duration;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = reqwest::Client::new();
 
-    let coordinator_url = "http://127.0.0.1:3000"; 
+    let coordinator_url = "http://10.0.0.1:3000"; 
     let my_worker_id = "worker-01";
 
     println!("Iniciando worker: {}...", my_worker_id);
@@ -46,4 +46,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Pausa de 2 segundos antes de pedir otra tarea
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
+
 }
