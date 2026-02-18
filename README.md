@@ -21,6 +21,28 @@ Nora Esthela Simental Beaven
 - Docker & Docker Compose
 - Rust
 
+## Instrucciones para levantar la VPN
+# 1. Instalar WireGuard en cada nodo:
+sudo apt update
+sudo apt install wireguard -y
+
+# 2. Generar claves en cada nodo:
+wg genkey | tee privatekey | wg pubkey > publickey
+
+# 3.Configurar el archivo /etc/wireguard/wg0.conf:
+- Asignar una IP del segmento 10.10.10.0/24
+- Definir la clave privada del nodo
+- En el nodo hub: agregar los peers con AllowedIPs = 10.10.10.X/32
+- En los peers: apuntar al hub con Endpoint = IP_PUBLICA:51820
+- Usar AllowedIPs = 10.10.10.0/24 en los peers
+
+# 4. Levantar la VPN:
+sudo wg-quick up wg0
+
+# 5. Verificar la conexión:
+sudo wg
+ping 10.10.10.X
+
 ## Especificaciones del Sistema
 ## Requisitos de Hardware
 Para la correcta implementación del sistema distribuido se requiere:
