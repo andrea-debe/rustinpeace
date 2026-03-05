@@ -1,0 +1,30 @@
+syntax = "proto3";
+package mandelbrot;
+
+// Servicio que el Hub expondrá y los Workers consumirán
+service Calculator {
+    // Worker pide una tarea
+    rpc GetTask (Empty) returns (Task);
+    
+    // Worker envía el resultado de su cálculo
+    rpc SubmitResult (ResultPayload) returns (Empty);
+}
+
+// Mensaje vacío para cuando no necesitamos enviar parámetros
+message Empty {}
+
+// Coordinador le entrega al worker
+message Task {
+    uint32 task_id = 1;
+    uint32 row = 2;             // fila del fractal a calcular
+    uint32 width = 3;           // Ancho total de la imagen
+    uint32 height = 4;          // Alto total de la imagen
+    uint32 max_iterations = 5;  // Límite de iteraciones (calidad del fractal)
+}
+
+// Worker le regresa al coordinador
+message ResultPayload {
+    uint32 task_id = 1;
+    string worker_id = 2;
+    bytes data = 3;
+}
