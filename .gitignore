@@ -1,0 +1,13 @@
+
+# IDEs
+.idea/
+*.iml
+
+# Rust
+target/
+**/*.rs.bk
+
+# Seguridad (IMPORTANTE)
+**/privatekey
+**/vpn/keys/
+**/*.conf
