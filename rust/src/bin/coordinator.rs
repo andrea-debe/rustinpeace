@@ -1,56 +1,46 @@
 use std::sync::Arc;
+use std::time::Instant; // NUEVO: Para la medición de rendimiento
 use tokio::sync::Mutex;
 use tonic::{transport::Server, Request, Response, Status};
 
-// Importamos el código que Protobuf generó mágicamente por nosotros
 use mandelbrot_distribuido::mandelbrot::calculator_server::{Calculator, CalculatorServer};
 use mandelbrot_distribuido::mandelbrot::{Empty, ResultPayload, Task};
 
-// 1. Definimos el "Estado" de nuestro servidor
 #[derive(Debug)]
 struct CoordinatorState {
-    pending_tasks: Vec<u32>, // Una cola con los números de las filas a calcular
-    width: u32,              // Ancho de la imagen final
-    height: u32,             // Alto de la imagen final
-    max_iterations: u32,     // Calidad del fractal
-    completed_tasks: u32,    // Contador para saber cuándo terminamos
+    pending_tasks: Vec<u32>,
+    width: u32,
+    height: u32,
+    max_iterations: u32,
+    completed_tasks: u32,
+    start_time: Instant,           // NUEVO: El cronómetro
+    image_buffer: Vec<u8>,         // NUEVO: Nuestro lienzo de píxeles
 }
 
-// 2. Definimos nuestra estructura principal que guardará el estado protegido
 #[derive(Debug)]
 struct MyCoordinator {
     state: Arc<Mutex<CoordinatorState>>,
 }
 
-// 3. Implementamos el trait Calculator (El contrato de gRPC)
 #[tonic::async_trait]
 impl Calculator for MyCoordinator {
-    
-    // Función que los workers llaman para pedir trabajo
     async fn get_task(&self, _request: Request<Empty>) -> Result<Response<Task>, Status> {
-        // Bloqueamos el estado temporalmente para que ningún otro worker lo toque
         let mut state = self.state.lock().await;
 
-        // Sacamos la última fila disponible de la cola
         if let Some(row) = state.pending_tasks.pop() {
-            println!(">> Asignando fila {} a un worker", row);
-            
             let task = Task {
-                task_id: row, // Usamos la misma fila como ID
+                task_id: row,
                 row,
                 width: state.width,
                 height: state.height,
                 max_iterations: state.max_iterations,
             };
-            
-            Ok(Response::new(task)) // Enviamos la tarea
+            Ok(Response::new(task))
         } else {
-            // Si la cola está vacía, le decimos al worker que ya no hay trabajo
-            Err(Status::not_found("No hay más tareas disponibles. ¡Fractal completado!"))
+            Err(Status::not_found("No hay más tareas disponibles."))
         }
     }
 
-    // Función que los workers llaman para entregar resultados
     async fn submit_result(
         &self,
         request: Request<ResultPayload>,
@@ -58,36 +48,60 @@ impl Calculator for MyCoordinator {
         let payload = request.into_inner();
         let mut state = self.state.lock().await;
 
+        // 1. Calculamos en qué posición del lienzo maestro va esta fila
+        let start_idx = (payload.task_id * state.width) as usize;
+        let end_idx = start_idx + (state.width as usize);
+
+        // 2. Copiamos los bytes crudos directamente al lienzo maestro
+        if payload.data.len() == state.width as usize {
+            state.image_buffer[start_idx..end_idx].copy_from_slice(&payload.data);
+        }
+
         state.completed_tasks += 1;
-        println!(
-            "<< Resultado de fila {} recibido del {}. Progreso: {}/{}",
-            payload.task_id, payload.worker_id, state.completed_tasks, state.height
-        );
+        
+        // Imprimimos progreso cada 100 filas para no saturar la terminal
+        if state.completed_tasks % 100 == 0 || state.completed_tasks == state.height {
+            println!("Progreso: {}/{}", state.completed_tasks, state.height);
+        }
 
-        // NOTA: Aquí es donde en el futuro tomaremos `payload.data` (los bytes) 
-        // y los pintaremos en nuestra imagen PNG.
-
+        // 3. ¿Terminamos? Detener reloj y guardar imagen
         if state.completed_tasks == state.height {
-            println!("\n¡CÁLCULO DISTRIBUIDO DE MANDELBROT COMPLETADO EXITOSAMENTE!");
+            let duration = state.start_time.elapsed(); // Detenemos el cronómetro
+            
+            println!("\n====================================================");
+            println!("¡CÁLCULO DISTRIBUIDO DE MANDELBROT COMPLETADO!");
+            println!("Tiempo total de ejecución: {:.2?}", duration); // Requisito de rendimiento
+            println!("====================================================\n");
+
+            println!("Ensamblando y guardando mandelbrot.png...");
+            
+            // Guardamos el arreglo de bytes como una imagen en escala de grises (L8)
+            if let Err(e) = image::save_buffer(
+                "mandelbrot.png",
+                &state.image_buffer,
+                state.width,
+                state.height,
+                image::ColorType::L8,
+            ) {
+                println!("Error al guardar la imagen: {}", e);
+            } else {
+                println!("¡Imagen guardada con éxito en la carpeta rust!");
+            }
         }
 
         Ok(Response::new(Empty {}))
     }
 }
 
-// 4. El punto de entrada principal
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Escuchamos en todas las interfaces, puerto 3000
     let addr = "0.0.0.0:3000".parse().unwrap();
 
-    // Configuramos nuestro fractal (Ej. 800x800 píxeles)
-    let height = 800;
-    let width = 800;
+    // Aumentamos un poco la resolución para que se vea genial
+    let width = 1920;
+    let height = 1080;
     
-    // Llenamos la cola con las filas de la 0 a la 799
     let mut pending_tasks: Vec<u32> = (0..height).collect();
-    // Le damos la vuelta para que el método .pop() empiece sacando la fila 0
     pending_tasks.reverse();
 
     let state = CoordinatorState {
@@ -96,6 +110,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         height,
         max_iterations: 1000,
         completed_tasks: 0,
+        start_time: Instant::now(), // Disparamos el cronómetro
+        image_buffer: vec![0; (width * height) as usize], // Creamos el lienzo en blanco (negro)
     };
 
     let coordinator = MyCoordinator {
@@ -103,9 +119,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     println!("Coordinador gRPC iniciado y escuchando en {}", addr);
-    println!("Total de tareas encoladas: {}", height);
+    println!("Resolución del fractal: {}x{}", width, height);
 
-    // Levantamos el servidor de alto rendimiento
     Server::builder()
         .add_service(CalculatorServer::new(coordinator))
         .serve(addr)
