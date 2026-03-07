@@ -48,7 +48,7 @@ fn calculate_mandelbrot_row(row: u32, width: u32, height: u32, max_iterations: u
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // IMPORTANTE: Como estás en tu máquina local sin conectar a la VPN por ahora,
     // usaremos 127.0.0.1. Cuando lo lleves a Docker, lo cambiarás por 10.0.0.1
-    let coordinator_url = "http://127.0.0.1:3000";
+    let coordinator_url = "http://10.0.0.1:3000";
     let my_worker_id = "worker-wsl2"; // Puedes cambiarle el nombre
 
     println!("Iniciando worker: {}", my_worker_id);
