@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant; // NUEVO: Para la medición de rendimiento
 use tokio::sync::Mutex;
@@ -13,8 +14,9 @@ struct CoordinatorState {
     height: u32,
     max_iterations: u32,
     completed_tasks: u32,
-    start_time: Instant,           // NUEVO: El cronómetro
-    image_buffer: Vec<u8>,         // NUEVO: Nuestro lienzo de píxeles
+    start_time: Instant,        
+    image_buffer: Vec<u8>,
+    active_workers: HashSet<String>,
 }
 
 #[derive(Debug)]
@@ -47,6 +49,8 @@ impl Calculator for MyCoordinator {
     ) -> Result<Response<Empty>, Status> {
         let payload = request.into_inner();
         let mut state = self.state.lock().await;
+	
+	state.active_workers.insert(payload.worker_id.clone());
 
         // 1. Calculamos en qué posición del lienzo maestro va esta fila
         let start_idx = (payload.task_id * state.width) as usize;
@@ -61,8 +65,13 @@ impl Calculator for MyCoordinator {
         
         // Imprimimos progreso cada 100 filas para no saturar la terminal
         if state.completed_tasks % 100 == 0 || state.completed_tasks == state.height {
-            println!("Progreso: {}/{}", state.completed_tasks, state.height);
-        }
+            println!(
+                "Progreso: {}/{} | Workers activos detectados: {}", 
+                state.completed_tasks, 
+                state.height,
+                state.active_workers.len() // ¡Muestra el tamaño de la lista!
+            );
+    	}
 
         // 3. ¿Terminamos? Detener reloj y guardar imagen
         if state.completed_tasks == state.height {
@@ -112,6 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         completed_tasks: 0,
         start_time: Instant::now(), // Disparamos el cronómetro
         image_buffer: vec![0; (width * height) as usize], // Creamos el lienzo en blanco (negro)
+        active_workers: HashSet::new(),
     };
 
     let coordinator = MyCoordinator {
