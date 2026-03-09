@@ -49,8 +49,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // IMPORTANTE: Como estás en tu máquina local sin conectar a la VPN por ahora,
     // usaremos 127.0.0.1. Cuando lo lleves a Docker, lo cambiarás por 10.0.0.1
     let coordinator_url = "http://10.0.0.2:3000";
-    let container_id = std::env::var("HOSTNAME").unwrap_or_else(|_| "local".to_string());
-    let my_worker_id = format!("worker-{}", container_id);
+    let unique_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+        
+    let my_worker_id = format!("worker-{}", unique_time);
 
     println!("Iniciando worker: {}", my_worker_id);
     println!("Buscando al coordinador en {}...", coordinator_url);
