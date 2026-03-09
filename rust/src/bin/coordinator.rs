@@ -1,6 +1,6 @@
-use std::collections::HashSet;
+use std::collections::HashMap; // Cambiamos HashSet por HashMap
 use std::sync::Arc;
-use std::time::Instant; // NUEVO: Para la medición de rendimiento
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tonic::{transport::Server, Request, Response, Status};
 
@@ -10,13 +10,14 @@ use mandelbrot_distribuido::mandelbrot::{Empty, ResultPayload, Task};
 #[derive(Debug)]
 struct CoordinatorState {
     pending_tasks: Vec<u32>,
+    in_progress: HashMap<u32, Instant>, // NUEVO: Tareas prestadas y la hora en que se prestaron
     width: u32,
     height: u32,
     max_iterations: u32,
     completed_tasks: u32,
-    start_time: Instant,        
+    start_time: Instant,
     image_buffer: Vec<u8>,
-    active_workers: HashSet<String>,
+    worker_heartbeats: HashMap<String, Instant>, // NUEVO: Registro de "última vez visto" por worker
 }
 
 #[derive(Debug)]
@@ -28,8 +29,32 @@ struct MyCoordinator {
 impl Calculator for MyCoordinator {
     async fn get_task(&self, _request: Request<Empty>) -> Result<Response<Task>, Status> {
         let mut state = self.state.lock().await;
+        let now = Instant::now();
+        let timeout = Duration::from_secs(15); // Si un worker tarda más de 15s en una fila, lo damos por muerto
 
-        if let Some(row) = state.pending_tasks.pop() {
+        // 1. REVISIÓN DE CAÍDAS: Buscamos si alguna tarea en progreso expiró
+        let mut expired_task = None;
+        for (&task_id, &start_time) in state.in_progress.iter() {
+            if now.duration_since(start_time) > timeout {
+                expired_task = Some(task_id);
+                break; // Encontramos una, la rescatamos
+            }
+        }
+
+        // 2. ASIGNACIÓN: Decidimos qué tarea darle al worker
+        let task_to_assign = if let Some(id) = expired_task {
+            println!(">> ¡Worker caído detectado! Reasignando fila perdida: {}", id);
+            Some(id)
+        } else {
+            // Si no hay tareas expiradas, sacamos una nueva de la cola normal
+            state.pending_tasks.pop()
+        };
+
+        // 3. ENTREGAMOS LA TAREA
+        if let Some(row) = task_to_assign {
+            // La registramos como "En progreso" con la hora actual
+            state.in_progress.insert(row, Instant::now());
+            
             let task = Task {
                 task_id: row,
                 row,
@@ -39,7 +64,13 @@ impl Calculator for MyCoordinator {
             };
             Ok(Response::new(task))
         } else {
-            Err(Status::not_found("No hay más tareas disponibles."))
+            // Si no hay tareas nuevas ni expiradas, verificamos si ya terminamos todo
+            if state.in_progress.is_empty() {
+                Err(Status::not_found("¡Fractal completado!"))
+            } else {
+                // Hay tareas calculándose, pero aún no expiran. Le decimos al worker que espere.
+                Err(Status::unavailable("Esperando a que los demás terminen sus tareas..."))
+            }
         }
     }
 
@@ -49,52 +80,55 @@ impl Calculator for MyCoordinator {
     ) -> Result<Response<Empty>, Status> {
         let payload = request.into_inner();
         let mut state = self.state.lock().await;
-	
-	state.active_workers.insert(payload.worker_id.clone());
+        let now = Instant::now();
 
-        // 1. Calculamos en qué posición del lienzo maestro va esta fila
-        let start_idx = (payload.task_id * state.width) as usize;
-        let end_idx = start_idx + (state.width as usize);
+        // Actualizamos el "Latido de vida" de este worker
+        state.worker_heartbeats.insert(payload.worker_id.clone(), now);
 
-        // 2. Copiamos los bytes crudos directamente al lienzo maestro
-        if payload.data.len() == state.width as usize {
-            state.image_buffer[start_idx..end_idx].copy_from_slice(&payload.data);
-        }
+        // SOLO procesamos el resultado si la tarea sigue en nuestra lista "En progreso"
+        // (Esto evita que si un worker "revive" tarde, arruine el contador sumando doble)
+        if state.in_progress.remove(&payload.task_id).is_some() {
+            let start_idx = (payload.task_id * state.width) as usize;
+            let end_idx = start_idx + (state.width as usize);
 
-        state.completed_tasks += 1;
-        
-        // Imprimimos progreso cada 100 filas para no saturar la terminal
-        if state.completed_tasks % 100 == 0 || state.completed_tasks == state.height {
-            println!(
-                "Progreso: {}/{} | Workers activos detectados: {}", 
-                state.completed_tasks, 
-                state.height,
-                state.active_workers.len() // ¡Muestra el tamaño de la lista!
-            );
-    	}
+            if payload.data.len() == state.width as usize {
+                state.image_buffer[start_idx..end_idx].copy_from_slice(&payload.data);
+            }
 
-        // 3. ¿Terminamos? Detener reloj y guardar imagen
-        if state.completed_tasks == state.height {
-            let duration = state.start_time.elapsed(); // Detenemos el cronómetro
+            state.completed_tasks += 1;
             
-            println!("\n====================================================");
-            println!("¡CÁLCULO DISTRIBUIDO DE MANDELBROT COMPLETADO!");
-            println!("Tiempo total de ejecución: {:.2?}", duration); // Requisito de rendimiento
-            println!("====================================================\n");
+            // LIMPIEZA DE WORKERS: Borramos del contador a los que llevan más de 15s sin reportarse
+            let heartbeat_timeout = Duration::from_secs(15);
+            state.worker_heartbeats.retain(|_, &mut last_seen| now.duration_since(last_seen) < heartbeat_timeout);
 
-            println!("Ensamblando y guardando mandelbrot.png...");
-            
-            // Guardamos el arreglo de bytes como una imagen en escala de grises (L8)
-            if let Err(e) = image::save_buffer(
-                "mandelbrot.png",
-                &state.image_buffer,
-                state.width,
-                state.height,
-                image::ColorType::L8,
-            ) {
-                println!("Error al guardar la imagen: {}", e);
-            } else {
-                println!("¡Imagen guardada con éxito en la carpeta rust!");
+            if state.completed_tasks % 100 == 0 || state.completed_tasks == state.height {
+                println!(
+                    "Progreso: {}/{} | Workers activos reales: {}", 
+                    state.completed_tasks, 
+                    state.height,
+                    state.worker_heartbeats.len() // Ahora sí, el número será 100% exacto
+                );
+            }
+
+            if state.completed_tasks == state.height {
+                let duration = state.start_time.elapsed();
+                
+                println!("\n====================================================");
+                println!("¡CÁLCULO DISTRIBUIDO COMPLETADO!");
+                println!("Tiempo total de ejecución: {:.2?}", duration);
+                println!("====================================================\n");
+
+                if let Err(e) = image::save_buffer(
+                    "mandelbrot.png",
+                    &state.image_buffer,
+                    state.width,
+                    state.height,
+                    image::ColorType::L8,
+                ) {
+                    println!("Error al guardar la imagen: {}", e);
+                } else {
+                    println!("¡Imagen guardada con éxito!");
+                }
             }
         }
 
@@ -105,8 +139,6 @@ impl Calculator for MyCoordinator {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = "0.0.0.0:3000".parse().unwrap();
-
-    // Aumentamos un poco la resolución para que se vea genial
     let width = 1920;
     let height = 1080;
     
@@ -115,21 +147,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state = CoordinatorState {
         pending_tasks,
+        in_progress: HashMap::new(), // Inicializamos vacío
         width,
         height,
         max_iterations: 1000,
         completed_tasks: 0,
-        start_time: Instant::now(), // Disparamos el cronómetro
-        image_buffer: vec![0; (width * height) as usize], // Creamos el lienzo en blanco (negro)
-        active_workers: HashSet::new(),
+        start_time: Instant::now(),
+        image_buffer: vec![0; (width * height) as usize],
+        worker_heartbeats: HashMap::new(), // Inicializamos vacío
     };
 
     let coordinator = MyCoordinator {
         state: Arc::new(Mutex::new(state)),
     };
 
-    println!("Coordinador gRPC iniciado y escuchando en {}", addr);
-    println!("Resolución del fractal: {}x{}", width, height);
+    println!("Coordinador escuchando en {}", addr);
 
     Server::builder()
         .add_service(CalculatorServer::new(coordinator))
