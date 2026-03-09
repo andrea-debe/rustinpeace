@@ -1,4 +1,5 @@
 FROM rust:latest AS builder
+RUN apt-get update && apt-get install -y protobuf-compiler
 WORKDIR /app
 COPY rust/ ./rust/
 WORKDIR /app/rust
