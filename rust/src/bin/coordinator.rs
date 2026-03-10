@@ -139,8 +139,8 @@ impl Calculator for MyCoordinator {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = "0.0.0.0:3000".parse().unwrap();
-    let width = 1920;
-    let height = 1080;
+    let width = 3840;
+    let height = 2160;
     
     let mut pending_tasks: Vec<u32> = (0..height).collect();
     pending_tasks.reverse();
